@@ -19,7 +19,7 @@ source_choice = questdlg(...
              '  • Instant\n' ...
              '  • Use provided .txt files']), ...
     'Select Line Data Source', ...
-    'Generate New', 'Load from File', 'Cancel');
+    'Generate New', 'Load from File', 'Cancel', 'Generate New');
 
 if isempty(source_choice) || strcmp(source_choice, 'Cancel')
     disp('Cancelled.'); return;
@@ -111,7 +111,7 @@ prompts = {
 };
 dlg_title = 'Spectrum Parameters';
 defaults = {'323.15', '2.29', '127.0', ...
-            sprintf('%.2f', lambda_low), sprintf('%.2f', lambda_high), '0.0001'};
+            sprintf('%.2f', lambda_low), sprintf('%.2f', lambda_high), '0.001'};
 
 answers = inputdlg(prompts, dlg_title, 1, defaults, opts);
 if isempty(answers), disp('Cancelled.'); return; end
@@ -131,6 +131,23 @@ end
 wnstart = 1e7 / lambda_stop;
 wnstop = 1e7 / lambda_start;
 wnstep = (wnstop - wnstart) / ((lambda_stop - lambda_start) / lambda_step);
+
+% Clamp the spectrum range to the span actually covered by the line data.
+% Points outside the generated/loaded lines have no transitions and would
+% otherwise be reported as spurious 100% transmission (T=1) rather than
+% "no data". (calc_trans only sees lines in lines.energy.)
+wn_data_lo = min(lines.energy);
+wn_data_hi = max(lines.energy);
+if wnstart < wn_data_lo - wnstep || wnstop > wn_data_hi + wnstep
+    fprintf(['NOTE: requested range %.2f-%.2f nm (%.4f-%.4f cm-1) extends ' ...
+             'beyond the\n      line data (%.4f-%.4f cm-1 = %.2f-%.2f nm). ' ...
+             'Clamping to the covered span;\n      the uncovered region ' ...
+             'would otherwise read as false 100%% transmission.\n'], ...
+            lambda_start, lambda_stop, wnstart, wnstop, ...
+            wn_data_lo, wn_data_hi, 1e7/wn_data_hi, 1e7/wn_data_lo);
+    wnstart = max(wnstart, wn_data_lo);
+    wnstop  = min(wnstop,  wn_data_hi);
+end
 
 %% AETS selection (Average Electronic Transition Strength)
 aets_choice = questdlg(...
