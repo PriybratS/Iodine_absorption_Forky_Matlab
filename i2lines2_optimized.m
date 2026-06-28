@@ -1,6 +1,16 @@
 function lines = i2lines2_optimized(wnlo, wnhi, fcf_file)
-% I2LINES2_OPTIMIZED - Generate I₂ line data 
-% Replaces FORTRAN i2lines2.f with vectorized MATLAB
+% I2LINES2_OPTIMIZED - Generate I₂ line data
+% Verified port of FORTRAN i2lines2.f.
+%
+% FIXES 28/06/2026 i2lines2_optimized.m (verified against 18786to19791m2.txt):
+%   1. calc_fcf was called with j_vec(mask(k)) -- indexed the logical mask by k
+%      instead of selecting the masked J-values (crash / wrong FCF). Fixed by
+%      precomputing jr=j_vec(r_mask)/jp=j_vec(p_mask) and indexing jr(k)/jp(k).
+%   2. load_b_constants mis-scaled the centrifugal-distortion constants:
+%        DU was 10-100x too small for v>=20; HU/LU/MU had the WRONG SIGN
+%        (FORTRAN uses -1e-xx) plus wrong magnitudes/region boundaries.
+%      The *_raw arrays are pre-shifted so the correct, FORTRAN-equivalent
+%      scaling is a single uniform factor per constant (see load_b_constants).
 %
 % INPUTS:
 %   wnlo     - Low wavenumber [cm⁻¹]
@@ -13,17 +23,17 @@ function lines = i2lines2_optimized(wnlo, wnhi, fcf_file)
 
     fprintf('Generating lines from %.0f to %.0f cm⁻¹...\n', wnlo, wnhi);
     tic;
-    
+
     %% Load spectroscopic constants (same as FORTRAN)
     [EL, BL, DL, HL] = load_x_constants();
     [EU, BU, DU, HU, LU, MU] = load_b_constants();
-    
+
     %% Load FCF data
     [factor, ljfmax] = load_fcf(fcf_file);
-    
+
     %% Calculate J limits (dissociation boundary)
     jmax = min(200, max(0, floor(-4.375*(0:69) + 375)));
-    
+
     %% Pre-allocate maximum possible transitions
     % Max: 20 v" × 70 v' × 200 J × 2 branches = 560,000
     % Typical: ~10,000 for 2 cm⁻¹ range at 532nm
@@ -36,9 +46,9 @@ function lines = i2lines2_optimized(wnlo, wnhi, fcf_file)
     fcf_all = zeros(max_lines, 1);
     deltaeqq_all = zeros(max_lines, 1);
     deltac_all = zeros(max_lines, 1);
-    
+
     m = 0;  % Line counter
-    
+
     %% Generate transitions (vectorized over J)
     for ivl = 0:19
         for ivu = 0:69
@@ -47,17 +57,17 @@ function lines = i2lines2_optimized(wnlo, wnhi, fcf_file)
             alpha = (j_vec+1) .* (j_vec+2);
             beta = j_vec .* (j_vec-1);
             gamma = j_vec .* (j_vec+1);
-            
+
             % R-branch energies (J" → J"+1)
             er = EU(ivu+1) + BU(ivu+1)*alpha - DU(ivu+1)*alpha.^2 + ...
                  HU(ivu+1)*alpha.^3 + LU(ivu+1)*alpha.^4 + MU(ivu+1)*alpha.^5 - ...
                  EL(ivl+1) - BL(ivl+1)*gamma + DL(ivl+1)*gamma.^2 - HL(ivl+1)*gamma.^3;
-            
+
             % P-branch energies (J" → J"-1)
             ep = EU(ivu+1) + BU(ivu+1)*beta - DU(ivu+1)*beta.^2 + ...
                  HU(ivu+1)*beta.^3 + LU(ivu+1)*beta.^4 + MU(ivu+1)*beta.^5 - ...
                  EL(ivl+1) - BL(ivl+1)*gamma + DL(ivl+1)*gamma.^2 - HL(ivl+1)*gamma.^3;
-            
+
             % R-branch in range
             r_mask = (er >= wnlo) & (er <= wnhi);
             nr = sum(r_mask);
@@ -68,26 +78,27 @@ function lines = i2lines2_optimized(wnlo, wnhi, fcf_file)
                 ivl_all(idx) = ivl;
                 j_all(idx) = j_vec(r_mask);
                 branch_all(idx) = 'R';
-                
+
                 % Hyperfine constants
                 gu = EU(ivu+1) - 15661.9409;
                 erot_r = BU(ivu+1)*alpha(r_mask) - DU(ivu+1)*alpha(r_mask).^2 + ...
                          HU(ivu+1)*alpha(r_mask).^3 + LU(ivu+1)*alpha(r_mask).^4 + ...
                          MU(ivu+1)*alpha(r_mask).^5;
                 etot_r = gu + erot_r;
-                
+
                 deltaeqq_all(idx) = (1973.0307 - 0.0209608*gu - ...
                                      1.44052*erot_r./(4381.212 - etot_r)) / 30000;
                 deltac_all(idx) = (42993.4 ./ (4381.212-gu).^0.82575 - 28.7532) / 3e7;
-                
+
                 % FCF (interpolate/extrapolate)
+                jr = j_vec(r_mask);
                 for k = 1:nr
-                    fcf_all(idx(k)) = calc_fcf(ivu, ivl, j_vec(r_mask(k)), factor, ljfmax);
+                    fcf_all(idx(k)) = calc_fcf(ivu, ivl, jr(k), factor, ljfmax);
                 end
-                
+
                 m = m + nr;
             end
-            
+
             % P-branch in range
             p_mask = (ep >= wnlo) & (ep <= wnhi);
             np = sum(p_mask);
@@ -98,30 +109,31 @@ function lines = i2lines2_optimized(wnlo, wnhi, fcf_file)
                 ivl_all(idx) = ivl;
                 j_all(idx) = j_vec(p_mask);
                 branch_all(idx) = 'P';
-                
+
                 % Hyperfine constants
                 gu = EU(ivu+1) - 15661.9409;
                 erot_p = BU(ivu+1)*beta(p_mask) - DU(ivu+1)*beta(p_mask).^2 + ...
                          HU(ivu+1)*beta(p_mask).^3 + LU(ivu+1)*beta(p_mask).^4 + ...
                          MU(ivu+1)*beta(p_mask).^5;
                 etot_p = gu + erot_p;
-                
+
                 deltaeqq_all(idx) = (1973.0307 - 0.0209608*gu - ...
                                      1.44052*erot_p./(4381.212 - etot_p)) / 30000;
                 deltac_all(idx) = (42993.4 ./ (4381.212-gu).^0.82575 - 28.7532) / 3e7;
-                
+
+                jp = j_vec(p_mask);
                 for k = 1:np
-                    fcf_all(idx(k)) = calc_fcf(ivu, ivl, j_vec(p_mask(k)), factor, ljfmax);
+                    fcf_all(idx(k)) = calc_fcf(ivu, ivl, jp(k), factor, ljfmax);
                 end
-                
+
                 m = m + np;
             end
         end
     end
-    
+
     %% Sort by energy (FORTRAN used O(M²) bubble sort!)
     [energy_sorted, sort_idx] = sort(energy_all(1:m));
-    
+
     %% Package results
     lines.nlines = m;
     lines.energy = energy_sorted;
@@ -132,7 +144,7 @@ function lines = i2lines2_optimized(wnlo, wnhi, fcf_file)
     lines.fcf = fcf_all(sort_idx);
     lines.deltaeqq = deltaeqq_all(sort_idx);
     lines.deltac = deltac_all(sort_idx);
-    
+
     fprintf('Generated %d lines in %.2f sec\n', m, toc);
 end
 
@@ -141,7 +153,7 @@ function [EL, BL, DL, HL] = load_x_constants()
     EL = [0, 213.3023, 425.3742, 636.2103, 845.8034, 1054.1456, 1261.2284, ...
           1467.0428, 1671.5796, 1874.8295, 2076.7829, 2277.4300, 2476.7606, ...
           2674.7643, 2871.4302, 3066.7470, 3260.7032, 3453.2871, 3644.4874, 3834.2932];
-    
+
     BL = 0.1 * [0.3731114098671146, 0.3719670067802829, 0.3708161358474350, ...
                 0.3696585853818199, 0.3684941526048041, 0.3673226380482058, ...
                 0.3661438399566286, 0.3649575486897959, 0.3637635411248850, ...
@@ -149,7 +161,7 @@ function [EL, BL, DL, HL] = load_x_constants()
                 0.3589051000695991, 0.3576683004462275, 0.3564218491850814, ...
                 0.3551652720508696, 0.3538980365444274, 0.3526195463050510, ...
                 0.3513291355128313, 0.3500260632909881];
-    
+
     DL = 1e-8 * [0.4547547628207550, 0.4572208485138791, 0.4597534338572310, ...
                  0.4623730064958022, 0.4650910671516871, 0.4679135797367788, ...
                  0.4708437425553093, 0.4738840805962359, 0.4770378589154716, ...
@@ -157,7 +169,7 @@ function [EL, BL, DL, HL] = load_x_constants()
                  0.4909006993891605, 0.4947099513587618, 0.4986613820736552, ...
                  0.5027459833079082, 0.5069423531948184, 0.5112119994177510, ...
                  0.5154939634908213, 0.519698766129423];
-    
+
     HL = -1e-15 * [0.5127518681623231, 0.5340322291154361, 0.5556429468721693, ...
                    0.5779567669609448, 0.6012238577098949, 0.6256071108097138, ...
                    0.6512174418765087, 0.6781490910146517, 0.7065149233796305, ...
@@ -183,7 +195,7 @@ function [EU, BU, DU, HU, LU, MU] = load_b_constants()
           19821.5480, 19843.1241, 19863.2512, 19881.9758, 19899.3449, ...
           19915.4059, 19930.2072, 19943.7980, 19956.2281, 19967.5484, ...
           19977.8108, 19987.0680, 19995.3737, 20002.7823, 20009.3488];
-    
+
     % BU: Scaled ×0.1 for v≤64, ×0.01 for v=65..69
     BU_raw = [0.289256971, 0.287738074, 0.286194827, 0.284626516, 0.283032072, ...
               0.281410363, 0.279760289, 0.278080789, 0.276370807, 0.274629252, ...
@@ -202,8 +214,10 @@ function [EU, BU, DU, HU, LU, MU] = load_b_constants()
     BU = BU_raw;
     BU(1:65) = BU(1:65) * 0.1;
     BU(66:70) = BU(66:70) * 0.01;
-    
-    % DU: Need scaling per FORTRAN lines 193-210
+
+    % DU_raw is pre-shifted relative to the FORTRAN DATA values so that
+    % FORTRAN's region scaling (1e-8 v<=19, 1e-7 v=20..66, 1e-6 v=67..69)
+    % collapses to a single uniform factor of 1e-8.
     DU_raw = [0.623184071, 0.634498863, 0.646390069, 0.658936697, ...
               0.672194237, 0.686208169, 0.701022026, 0.716681823, ...
               0.733238172, 0.750747024, 0.769269693, 0.788872567, ...
@@ -222,12 +236,11 @@ function [EU, BU, DU, HU, LU, MU] = load_b_constants()
               6.28793001, 6.69261601, 7.13553235, 7.62122829, ...
               8.15487852, 8.74242437, 9.39076958, 10.1080529, ...
               10.9040280, 11.7905900];
-    DU = zeros(1,70);
-    DU(1:20) = DU_raw(1:20) * 1e-8;
-    DU(21:67) = DU_raw(21:67) * 1e-9;
-    DU(68:70) = DU_raw(68:70) * 1e-10;
-    
-    % HU: Scaling per lines 211-222
+    DU = DU_raw * 1e-8;
+
+    % HU is NEGATIVE in FORTRAN. HU_raw is pre-shifted so the region scaling
+    % (-1e-14 v<=17, -1e-13 v=18..42, -1e-12 v=43..62, -1e-11 v=63..69)
+    % collapses to a uniform -1e-14.
     HU_raw = [0.236059709, 0.255494386, 0.276699292, 0.299730171, ...
               0.324712735, 0.351828987, 0.381305617, 0.413404624, ...
               0.448416290, 0.486654557, 0.528454767, 0.574173652, ...
@@ -246,12 +259,10 @@ function [EU, BU, DU, HU, LU, MU] = load_b_constants()
               71.5844732, 82.7705783, 96.1453506, 112.222770, ...
               131.662627, 155.321297, 184.323647, 220.166265, ...
               264.867717, 321.190625];
-    HU = zeros(1,70);
-    HU(1:18) = HU_raw(1:18) * 1e-14;
-    HU(19:59) = HU_raw(19:59) * 1e-15;
-    HU(60:70) = HU_raw(60:70) * 1e-16;
-    
-    % LU: Scaling per lines 223-234
+    HU = -HU_raw * 1e-14;
+
+    % LU is NEGATIVE in FORTRAN. LU_raw is pre-shifted so the region scaling
+    % (-1e-20 .. -1e-15) collapses to a uniform -1e-20.
     LU_raw = [0.301891905, 0.339067474, 0.382234284, 0.431548074, ...
               0.487312647, 0.549996849, 0.620256031, 0.698953410, ...
               0.787179347, 0.886268189, 0.997813192, 1.12368044, ...
@@ -270,12 +281,10 @@ function [EU, BU, DU, HU, LU, MU] = load_b_constants()
               1522.26450, 1921.24993, 2444.46499, 3137.11182, ...
               4063.25388, 5314.74864, 7024.99197, 9390.45055, ...
               12705.0903, 17416.7121];
-    LU = zeros(1,70);
-    LU(1:17) = LU_raw(1:17) * 1e-20;
-    LU(18:58) = LU_raw(18:58) * 1e-21;
-    LU(59:70) = LU_raw(59:70) * 1e-22;
-    
-    % MU: Scaling per lines 235-246
+    LU = -LU_raw * 1e-20;
+
+    % MU is NEGATIVE in FORTRAN. MU_raw is pre-shifted so the region scaling
+    % (-1e-25 .. -1e-19) collapses to a uniform -1e-25.
     MU_raw = [0.106365241, 0.118424920, 0.134878319, 0.156148979, ...
               0.182822101, 0.215614715, 0.255362733, 0.303021172, ...
               0.359676671, 0.426572538, 0.505146923, 0.597084729, ...
@@ -294,10 +303,7 @@ function [EU, BU, DU, HU, LU, MU] = load_b_constants()
               9450.38537, 13097.7838, 18344.7759, 25973.7387, ...
               37192.4957, 53893.7621, 79094.4200, 117697.738, ...
               177852.696, 273453.277];
-    MU = zeros(1,70);
-    MU(1:17) = MU_raw(1:17) * 1e-26;
-    MU(18:57) = MU_raw(18:57) * 1e-27;
-    MU(58:70) = MU_raw(58:70) * 1e-28;
+    MU = -MU_raw * 1e-25;
 end
 
 function [factor, ljfmax] = load_fcf(fcf_file)
@@ -305,20 +311,23 @@ function [factor, ljfmax] = load_fcf(fcf_file)
     % Format: "  VP= 0   VS= 0   J=  0   T=15724.59   FCF=.1676-008   RC= 2.8265"
     fid = fopen(fcf_file, 'r');
     if fid == -1, error('Cannot open %s', fcf_file); end
-    
-    % ljfmax per FORTRAN lines 225-261
+
+    % ljfmax(ivu) = (number of FCF J-samples in fcfioded) - 1, EXACTLY per
+    % FORTRAN i2lines2.f lines 240-262. This sets the per-block line count for
+    % the sequential read below, so it MUST match the file or the whole read
+    % desynchronizes (this was the FCF bug). MATLAB index is ivu+1.
+    v = 0:69;
     ljfmax = zeros(1,70);
-    ljfmax(1:25) = 8;
-    ljfmax(26:46) = 7;
-    ljfmax(47:52) = 6;
-    ljfmax(53) = 5; ljfmax(54) = 6; ljfmax(55) = 6; 
-    ljfmax(56) = 5; ljfmax(57) = 6; ljfmax(58) = 5;
-    ljfmax(59:61) = 5;
-    ljfmax(62:64) = 4; ljfmax(65) = 3; ljfmax(66) = 4;
-    ljfmax(67:69) = 3; ljfmax(70) = 2;
-    
+    ljfmax( (v>=0 & v<=29) | (v>=31 & v<=41) | v==43 )         = 8;
+    ljfmax( v==30 | v==42 | (v>=44 & v<=46) | (v>=48 & v<=50) ) = 7;
+    ljfmax( v==47 | v==51 | v==52 | v==54 | v==57 )            = 6;
+    ljfmax( v==53 | v==55 | v==56 )                            = 5;
+    ljfmax( v>=59 & v<=63 )                                    = 4;
+    ljfmax( v==58 | v==64 | (v>=66 & v<=68) )                  = 3;
+    ljfmax( v==65 | v==69 )                                    = 2;
+
     factor = zeros(70, 20, 9);
-    
+
     for ivl = 0:19
         for ivu = 0:69
             max_lj = ljfmax(ivu+1);
